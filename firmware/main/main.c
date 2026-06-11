@@ -316,7 +316,15 @@ static void button_task(void *arg) {
             } else if (held >= 2000) {
                 enter_pairing();
             } else if (held >= 40) {                       // short → manual toggle
-                relay_apply(!s_relay_on); send_swstat();
+                relay_apply(!s_relay_on);
+                // Tell the hub this was a PHYSICAL toggle so its pump automation
+                // adopts it as a manual hold instead of reverting it on the next
+                // reconcile (~10s). Retried because ESP-NOW is lossy.
+                for (int i = 0; i < RELAY_ACK_RETRIES; i++) {
+                    send_to_hub(s_relay_on ? "MANUAL:ON" : "MANUAL:OFF");
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+                send_swstat();
             }
             down = 0;
         }
