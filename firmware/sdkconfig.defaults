@@ -10,3 +10,7 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # Single-app partition is fine for v0.1.0 (OTA partitioning added later).
 CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# Route the console to the native USB Serial/JTAG so logs appear over the XIAO's
+# USB port (default on C6 is UART0, which isn't broken out to USB on the XIAO).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

@@ -3,6 +3,19 @@
 // PC817 opto + 2N2222) + ZMCT103C 10A current TF + NTC temp.  REV 1.0 schematic.
 #pragma once
 
+// ── Board profile ────────────────────────────────────────────────────────────
+// Default = the REV 1.0 production board (C6-SuperMini + relay + ZMCT + NTC).
+// -DXIAO_C6_TEST builds for a bare Seeed XIAO ESP32-C6 with NO sensors fitted:
+// the relay maps to the onboard LED (so you can SEE the hub command it), the
+// button is the BOOT key, and the ZMCT/NTC ADC paths are disabled so the
+// floating sensor pins can't raise spurious over-current/temp/welded faults.
+#ifdef XIAO_C6_TEST
+  #define PIN_BUTTON    9     // XIAO C6 BOOT button (active-low)
+  #define PIN_RELAY     15    // XIAO C6 onboard user LED — visualises the relay
+  #define PIN_LED       15
+  #define LED_ACTIVE_LOW 0
+  #define NO_SENSORS    1     // ZMCT/NTC not fitted — skip ADC + sensor-based safety
+#else
 // ── Pin map (from the REV 1.0 schematic) ─────────────────────────────────────
 #define PIN_BUTTON      2     // tactile: short=toggle, 2s=pair, 8s=factory reset
 #define PIN_NTC_ADC     1     // GPIO1 = ADC1_CH1 — NTC divider (board temperature)
@@ -10,6 +23,13 @@
 #define PIN_RELAY       4     // relay drive (active HIGH → opto → coil). Boot LOW = OFF.
 #define PIN_LED         15    // status LED (D1). C6-SuperMini onboard ~GPIO15; adjust to board.
 #define LED_ACTIVE_LOW  1     // many SuperMini onboard LEDs are active-low
+#endif
+
+// ESP-NOW pairing scans these channels to find the hub (it has no WiFi creds,
+// like the battery TX). The paired channel is persisted to NVS.
+#define ESPNOW_DEFAULT_CHANNEL  1
+#define ESPNOW_CHAN_MIN         1
+#define ESPNOW_CHAN_MAX         13
 
 // ── Mains / metering ─────────────────────────────────────────────────────────
 #define MAINS_V_DEFAULT     230    // user-editable (web UI / SET:VOLT). For power = V×I_rms.

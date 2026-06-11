@@ -61,7 +61,10 @@ static int      s_load_ma = 0;
 static int      s_temp_c10 = 250;
 static uint8_t  s_hub_mac[6];
 static bool     s_paired = false;
+static uint8_t  s_channel = ESPNOW_DEFAULT_CHANNEL;   // hub's WiFi channel (found at pairing)
+#if !NO_SENSORS
 static adc_oneshot_unit_handle_t s_adc;
+#endif
 
 // Fault bits — identical numbering to the hub's SW_FAULT_* so SWSTAT maps 1:1.
 #define SW_FAULT_OVERCURRENT  0x01
@@ -80,6 +83,13 @@ static void relay_apply(bool on) {
 }
 
 // ── ADC: ZMCT RMS current + NTC temperature ──────────────────────────────────
+#if NO_SENSORS
+// Bare-board test profile (XIAO C6, no ZMCT/NTC fitted): report a quiet,
+// fault-free reading so the control loop + telemetry work without sensors.
+static void adc_setup(void) {}
+static int zmct_read_ma(void) { return 0; }
+static int ntc_read_c10(void) { return 250; }   // 25.0°C placeholder
+#else
 static void adc_setup(void) {
     adc_oneshot_unit_init_cfg_t u = { .unit_id = ADC_UNIT_1 };
     adc_oneshot_new_unit(&u, &s_adc);
@@ -121,6 +131,7 @@ static int ntc_read_c10(void) {
     float tK = 1.0f / (1.0f/298.15f + (1.0f/NTC_BETA) * logf(r / 10000.0f));
     return (int)((tK - 273.15f) * 10.0f);
 }
+#endif  // NO_SENSORS
 
 // ── ESP-NOW link ─────────────────────────────────────────────────────────────
 static void send_to_hub(const char *s) {
@@ -143,6 +154,8 @@ static void cfg_load(void) {
         if (nvs_get_u32(h, "runmax", &v32) == ESP_OK) s_cfg.max_runtime_s = v32;
         if (nvs_get_u32(h, "drymin", &v32) == ESP_OK) s_cfg.dry_min_ma = v32;
         if (nvs_get_blob(h, "hubmac", s_hub_mac, &l) == ESP_OK && l == 6) s_paired = true;
+        uint8_t ch;
+        if (nvs_get_u8(h, "chan", &ch) == ESP_OK && ch >= ESPNOW_CHAN_MIN && ch <= ESPNOW_CHAN_MAX) s_channel = ch;
         nvs_close(h);
     }
 }
@@ -181,9 +194,13 @@ static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data,
     } else if (strncmp(p, "PAIR_ACK", 8) == 0) {
         // PAIR_ACK:<addr>:0:<nonce>:<chan> — we just need the hub MAC (= sender).
         memcpy(s_hub_mac, info->src_addr, 6);
+        // We received the PAIR_ACK on the channel we're currently swept to — that
+        // IS the hub's channel. Persist both so we come back paired on reboot.
         nvs_handle_t h;
         if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-            nvs_set_blob(h, "hubmac", s_hub_mac, 6); nvs_commit(h); nvs_close(h);
+            nvs_set_blob(h, "hubmac", s_hub_mac, 6);
+            nvs_set_u8(h, "chan", s_channel);
+            nvs_commit(h); nvs_close(h);
         }
         esp_now_peer_info_t peer = { .channel = 0, .ifidx = WIFI_IF_STA };
         memcpy(peer.peer_addr, s_hub_mac, 6);
@@ -195,7 +212,7 @@ static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data,
 }
 
 static void enter_pairing(void) {
-    ESP_LOGI(TAG, "Pairing…");
+    ESP_LOGI(TAG, "Pairing — sweeping channels for the hub…");
     uint8_t bcast[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
     esp_now_peer_info_t peer = { .channel = 0, .ifidx = WIFI_IF_STA };
     memcpy(peer.peer_addr, bcast, 6);
@@ -205,10 +222,24 @@ static void enter_pairing(void) {
     char req[64];
     snprintf(req, sizeof(req), "PAIR_REQ:%u:%02x%02x%02x%02x%02x%02x:switch",
              nonce, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-    for (int i = 0; i < 20 && !s_paired; i++) {   // ~30s window
-        esp_now_send(bcast, (const uint8_t *)req, strlen(req));
-        vTaskDelay(pdMS_TO_TICKS(1500));
+    // No WiFi creds (like the battery TX) → sweep channels 1-13, broadcasting on
+    // each, until the hub answers PAIR_ACK (the recv cb sets s_paired + persists
+    // the channel). The hub must be in its 60s pairing window.
+    for (int pass = 0; pass < 4 && !s_paired; pass++) {
+        for (int ch = ESPNOW_CHAN_MIN; ch <= ESPNOW_CHAN_MAX && !s_paired; ch++) {
+            s_channel = (uint8_t)ch;
+            esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            esp_now_send(bcast, (const uint8_t *)req, strlen(req));
+            // Dwell ~900ms listening for the hub's PAIR_ACK before hopping — the
+            // hub needs time to gate, register, add the peer, and reply 3×. Too
+            // short and we move off-channel before the ACK lands (the hub registers
+            // us but we never learn we're paired). Check s_paired every 100ms so
+            // we break out promptly once the ACK arrives.
+            for (int w = 0; w < 9 && !s_paired; w++) vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
+    esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);  // settle on the paired/last channel
+    ESP_LOGI(TAG, "Pairing done (paired=%d, chan=%u)", (int)s_paired, s_channel);
 }
 
 // ── Safety task — the autonomous floor (runs even with no hub) ───────────────
@@ -321,6 +352,9 @@ void app_main(void) {
     esp_wifi_set_storage(WIFI_STORAGE_FLASH);
     esp_wifi_start();
     esp_wifi_set_ps(WIFI_PS_NONE);
+    // Unassociated STA → we own the channel. Park on the paired hub's channel
+    // (from NVS) so steady-state SWSTAT/RELAY reach the hub. Pairing re-sweeps.
+    esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
 
     esp_now_init();
     esp_now_register_recv_cb(on_espnow_recv);
@@ -335,4 +369,11 @@ void app_main(void) {
     xTaskCreate(safety_task, "safety", 4096, NULL, 6, NULL);
     xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
     xTaskCreate(telem_task,  "telem",  3072, NULL, 4, NULL);
+
+    // Auto-pair on boot when we have no hub yet — sweep channels for a hub that's
+    // in its pairing window. (The button still triggers pairing on demand later.)
+    if (!s_paired) {
+        vTaskDelay(pdMS_TO_TICKS(1500));   // let WiFi/ESP-NOW settle
+        enter_pairing();
+    }
 }

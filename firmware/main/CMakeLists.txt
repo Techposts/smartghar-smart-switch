@@ -11,3 +11,8 @@ idf_component_register(
         esp_timer
         esp_hw_support
 )
+
+# Bare XIAO ESP32-C6 test build (no ZMCT/NTC): idf.py -DXIAO_C6_TEST=1 build
+if(XIAO_C6_TEST)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE XIAO_C6_TEST=1)
+endif()

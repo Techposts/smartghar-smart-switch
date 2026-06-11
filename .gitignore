@@ -1,4 +1,6 @@
 firmware/build/
+firmware/build_*/
+firmware/.cache/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
