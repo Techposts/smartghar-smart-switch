@@ -39,6 +39,7 @@
 
 #include "config.h"
 #include "version_gen.h"   // FIRMWARE_VERSION (generated from VERSION)
+#include "softap_portal.h"
 
 static const char *TAG = "smartsw";
 
@@ -83,10 +84,17 @@ static void relay_apply(bool on) {
 }
 
 // ── ADC: ZMCT RMS current + NTC temperature ──────────────────────────────────
+// ZMCT scale (mA per RMS ADC count). Starts at the schematic estimate and is
+// replaced by per-board calibration through the SoftAP portal (NVS "zmctsc",
+// stored ×1000). This is THE number that makes load_ma honest.
+#define ZMCT_SCALE_DEFAULT  12.0f
+static float s_zmct_scale = ZMCT_SCALE_DEFAULT;
+
 #if NO_SENSORS
 // Bare-board test profile (XIAO C6, no ZMCT/NTC fitted): report a quiet,
 // fault-free reading so the control loop + telemetry work without sensors.
 static void adc_setup(void) {}
+static float zmct_read_rms_counts(void) { return 0; }
 static int zmct_read_ma(void) { return 0; }
 static int ntc_read_c10(void) { return 250; }   // 25.0°C placeholder
 #else
@@ -98,12 +106,11 @@ static void adc_setup(void) {
     adc_oneshot_config_channel(s_adc, ADC_CHANNEL_1, &c);   // GPIO1 NTC
 }
 
-// Sample the ZMCT over a few mains cycles, remove DC bias, return RMS current mA.
-// NOTE: the ZMCT103C burden + scale constant ZMCT_MA_PER_COUNT must be calibrated
-// on the real board with a known load — this is a first estimate.
+// Sample the ZMCT over a few mains cycles, remove DC bias, return RMS in raw
+// ADC counts. The portal's calibration divides a known current by this to set
+// s_zmct_scale, so the counts→mA conversion stays in ONE place (zmct_read_ma).
 #define ZMCT_SAMPLES        400      // ~5 mains cycles @ 50Hz at ~50us/sample
-#define ZMCT_MA_PER_COUNT   12.0f    // PLACEHOLDER — calibrate with the board
-static int zmct_read_ma(void) {
+static float zmct_read_rms_counts(void) {
     long sum = 0; int raw;
     int buf[ZMCT_SAMPLES];
     for (int i = 0; i < ZMCT_SAMPLES; i++) {
@@ -114,8 +121,10 @@ static int zmct_read_ma(void) {
     float mean = (float)sum / ZMCT_SAMPLES;
     double sq = 0;
     for (int i = 0; i < ZMCT_SAMPLES; i++) { float d = buf[i] - mean; sq += (double)d * d; }
-    float rms_counts = sqrtf((float)(sq / ZMCT_SAMPLES));
-    return (int)(rms_counts * ZMCT_MA_PER_COUNT);
+    return sqrtf((float)(sq / ZMCT_SAMPLES));
+}
+static int zmct_read_ma(void) {
+    return (int)(zmct_read_rms_counts() * s_zmct_scale);
 }
 
 // NTC via divider on GPIO1 → board temperature ×10. Beta-model first estimate;
@@ -156,6 +165,7 @@ static void cfg_load(void) {
         if (nvs_get_blob(h, "hubmac", s_hub_mac, &l) == ESP_OK && l == 6) s_paired = true;
         uint8_t ch;
         if (nvs_get_u8(h, "chan", &ch) == ESP_OK && ch >= ESPNOW_CHAN_MIN && ch <= ESPNOW_CHAN_MAX) s_channel = ch;
+        if (nvs_get_u32(h, "zmctsc", &v32) == ESP_OK && v32 > 0) s_zmct_scale = v32 / 1000.0f;
         nvs_close(h);
     }
 }
@@ -318,7 +328,69 @@ static void telem_task(void *arg) {
     for (;;) { send_swstat(); vTaskDelay(pdMS_TO_TICKS(SWSTAT_INTERVAL_MS)); }
 }
 
-// ── Button task — short=toggle, 2s=pair, 8s=factory reset ────────────────────
+// ── SoftAP portal accessors (softap_portal.h contract) ───────────────────────
+// The portal owns no switch state — it reads/writes through these so the
+// safety logic, NVS keys and hub semantics stay in exactly one place.
+void sw_portal_get_status(sw_status_t *out) {
+    out->fw = FIRMWARE_VERSION;
+    esp_read_mac(out->mac, ESP_MAC_WIFI_STA);
+    out->paired        = s_paired;
+    out->relay_on      = s_relay_on;
+    out->load_ma       = s_load_ma;
+    out->temp_c10      = s_temp_c10;
+    out->fault         = s_fault;
+    out->mains_v       = s_cfg.mains_v;
+    out->oc_limit_ma   = s_cfg.oc_limit_ma;
+    out->dry_min_ma    = s_cfg.dry_min_ma;
+    out->max_runtime_s = s_cfg.max_runtime_s;
+    out->zmct_scale    = s_zmct_scale;
+}
+
+void sw_portal_set_relay(bool on) {
+    // Same semantics as a physical press: refuse to close into a hard fault,
+    // and tell the hub it was MANUAL so its automation adopts a hold.
+    if (on && (s_fault & (SW_FAULT_OVERCURRENT | SW_FAULT_OVERTEMP))) return;
+    relay_apply(on);
+    for (int i = 0; i < RELAY_ACK_RETRIES; i++) {
+        send_to_hub(on ? "MANUAL:ON" : "MANUAL:OFF");
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    send_swstat();
+}
+
+void sw_portal_apply_config(uint16_t volt, uint32_t imax_ma, uint32_t drymin_ma, uint32_t runmax_s) {
+    s_cfg.mains_v       = volt;       cfg_save_u32("volt",   volt);
+    s_cfg.oc_limit_ma   = imax_ma;    cfg_save_u32("imax",   imax_ma);
+    s_cfg.dry_min_ma    = drymin_ma;  cfg_save_u32("drymin", drymin_ma);
+    s_cfg.max_runtime_s = runmax_s;   cfg_save_u32("runmax", runmax_s);
+    send_swstat();   // hub picks up the change on the next ingest
+}
+
+float sw_portal_calibrate(int known_ma) {
+    float counts = zmct_read_rms_counts();
+    // Below ~3 counts RMS is indistinguishable from ADC noise — refuse rather
+    // than store a garbage scale (also covers NO_SENSORS, which returns 0).
+    if (counts < 3.0f || known_ma <= 0) return -1.0f;
+    s_zmct_scale = (float)known_ma / counts;
+    cfg_save_u32("zmctsc", (uint32_t)(s_zmct_scale * 1000.0f + 0.5f));
+    ESP_LOGI(TAG, "ZMCT calibrated: %d mA / %.1f counts -> %.3f mA/count",
+             known_ma, counts, s_zmct_scale);
+    return s_zmct_scale;
+}
+
+void sw_portal_save_wifi(const char *ssid, const char *pass, const char *host, uint16_t port) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "wifi_ssid", ssid);
+        nvs_set_str(h, "wifi_pass", pass ? pass : "");
+        nvs_set_str(h, "mqtt_host", host ? host : "");
+        nvs_set_u16(h, "mqtt_port", port);
+        nvs_commit(h); nvs_close(h);
+    }
+    ESP_LOGI(TAG, "standalone WiFi creds saved (ssid=%s) — used when the WiFi/MQTT transport ships", ssid);
+}
+
+// ── Button task — short=toggle, 2s=pair, 4s=config portal, 8s=factory reset ──
 static void button_task(void *arg) {
     (void)arg;
     int64_t down = 0;
@@ -331,6 +403,8 @@ static void button_task(void *arg) {
             if (held >= 8000) {                            // factory reset
                 nvs_handle_t h; if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) { nvs_erase_all(h); nvs_commit(h); nvs_close(h); }
                 esp_restart();
+            } else if (held >= 4000) {                     // config portal (SoftAP) toggle
+                if (portal_active()) portal_stop(); else portal_start();
             } else if (held >= 2000) {
                 enter_pairing();
             } else if (held >= 40) {                       // short → manual toggle
@@ -401,5 +475,10 @@ void app_main(void) {
     if (!s_paired) {
         vTaskDelay(pdMS_TO_TICKS(1500));   // let WiFi/ESP-NOW settle
         enter_pairing();
+        // Still unpaired after the sweep → first-boot / out-of-box experience:
+        // raise the config portal so the unit is reachable without any hub
+        // (calibration, settings, future standalone WiFi). Closes after 10 min
+        // idle, or 4s-hold reopens it anytime.
+        if (!s_paired) portal_start();
     }
 }
