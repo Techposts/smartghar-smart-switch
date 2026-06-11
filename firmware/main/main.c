@@ -191,6 +191,22 @@ static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data,
     } else if (strncmp(p, "SET:", 4) == 0) {
         handle_set(p);
         send_to_hub("SET_ACK");
+    } else if (strncmp(p, "FORGET", 6) == 0) {
+        // The hub unpaired us. Only honour it from OUR paired hub (anti-spoof).
+        // Clear the stored pairing, safe-OFF the relay (no controller anymore),
+        // and restart so we come up unpaired and ready to pair fresh.
+        if (s_paired && memcmp(info->src_addr, s_hub_mac, 6) == 0) {
+            relay_apply(false);
+            nvs_handle_t h;
+            if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+                nvs_erase_key(h, "hubmac");
+                nvs_erase_key(h, "chan");
+                nvs_commit(h); nvs_close(h);
+            }
+            ESP_LOGW(TAG, "FORGET from hub — pairing cleared, restarting");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+        }
     } else if (strncmp(p, "PAIR_ACK", 8) == 0) {
         // PAIR_ACK:<addr>:0:<nonce>:<chan> — we just need the hub MAC (= sender).
         memcpy(s_hub_mac, info->src_addr, 6);
