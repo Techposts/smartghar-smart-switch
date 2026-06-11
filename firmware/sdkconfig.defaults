@@ -1,0 +1,12 @@
+# SmartGhar Smart Switch — ESP32-C6
+CONFIG_IDF_TARGET="esp32c6"
+
+# ESP-NOW rides on WiFi STA. Power-save OFF so ESP-NOW RX is never missed (the
+# switch is mains-powered, so always-on radio costs nothing).
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# Smaller log level for production; bump for bring-up.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Single-app partition is fine for v0.1.0 (OTA partitioning added later).
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
