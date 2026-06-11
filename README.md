@@ -29,7 +29,29 @@ The hub decides *when* to run the pump (level thresholds, source-tank guard, rat
 - **Inrush-tolerant over-current** — a pump surges to ~40A at start (4–7× run current) for a fraction of a second. The firmware ignores current during a startup grace window and trips only on *sustained* over-current — never on the start surge. (The 10A ZMCT saturates above ~10A; the 30A relay handles the surge easily.)
 - **Over-temperature** trip with hysteresis.
 - **Welded-contact detection** — relay commanded OFF but current still flowing ⇒ flagged loudly (software can't open a fused contact, but it can alert).
-- **Autonomous max-runtime** — a hard runtime cap even if the hub never sends OFF.
+- **Autonomous max-runtime** — a hard runtime cap even if the hub never sends OFF. The hub sets this failsafe *longer* than its own intended run (`SET:RUNMAX = hub_max + buffer`) so the switch is a true backstop for a silent hub, never the part that cuts a valid run short.
+
+## Pairing with a TankSync hub
+
+The switch has no WiFi credentials of its own — it finds the hub the same way the battery tank sensors do, by sweeping WiFi channels for the hub's pairing window.
+
+1. **Open the hub's pairing window** — on the TankSync hub web UI, go to **Devices → Pair new**. This opens a ~60-second window (shared by LoRa and ESP-NOW).
+2. **Put the switch into pairing** — hold the button for **2 seconds** (a fresh, unpaired switch also enters pairing automatically on boot). It sweeps channels 1–13 broadcasting `PAIR_REQ:<nonce>:<mac>:switch`.
+3. **The hub recognises the device type** — the `:switch` token tells the hub this is a Smart Switch, not a tank, so it registers it as a **switch** (it appears under the **Switches** tab, not Tanks) and replies `PAIR_ACK` with the assigned address + its WiFi channel.
+4. **The switch remembers the hub** — it persists the hub MAC + channel to flash, so it re-connects instantly after a power cut. No re-pairing needed.
+
+**Re-pairing / moving to another hub:** hold the button **8 seconds** to factory-reset (clears the stored hub), then pair again. Removing the switch from a hub (Switches → **Unpair**) frees its address; pairing it again — even to the same hub — assigns a fresh slot.
+
+## Pump control (configured on the hub)
+
+The pump rule lives on the hub (**Switches** tab → *Pump control*). Per switch you set: the **tank to keep filled**, **start %** (pump on) and **stop %** (pump off), an optional **source-tank guard** (don't run if the source/sump is below X %), **max run time**, and **min rest between runs**.
+
+Anti-cycling / motor-protection rules the hub enforces so the pump never operates abruptly:
+
+- **Hysteresis band** — stop % must be at least 5 % above start % (the UI enforces it); a wide band + the 5-minute tank-report cadence means the pump can't chatter on sensor noise.
+- **Min rest between runs** — after the pump stops it won't restart until this elapses (anti short-cycle / inrush).
+- **Dry-run lockout** — if rate-of-rise (or the switch's own current signature) says the pump is running dry, the hub stops it **and latches it off for 30 minutes** instead of retrying every few minutes, so a dry pump isn't run repeatedly.
+- **Failsafe coordination** — the switch's autonomous max-runtime is always set longer than the hub's run, so the two timers never fight and restart-flap.
 
 ## Protocol (ESP-NOW, matches the TankSync hub)
 
