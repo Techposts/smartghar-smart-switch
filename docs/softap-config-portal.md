@@ -21,9 +21,17 @@ channel. SoftAP needs an AP interface. The clean approach:
 
 - **Default runtime:** STA-only (ESP-NOW), exactly as today.
 - **Config mode (on demand):** switch to **APSTA** — bring up a SoftAP
-  `SmartGhar-Switch-XXXX` (XXXX = MAC suffix) while keeping STA alive. ESP-NOW
+  `SmartGhar-Switch-XXXX` while keeping STA alive. ESP-NOW
   keeps working on the STA channel; the AP shares that channel (single-radio
   constraint — the AP **must** use the STA channel, can't pick its own).
+
+  **XXXX is the last two bytes of the STA MAC, uppercase hex** — e.g. STA MAC
+  `…:A3:F2` → SSID `SmartGhar-Switch-A3F2`. This is the SAME suffix the hub uses
+  for its default device name (`Smart Switch A3F2`, derived from the MAC the hub
+  sees at pairing), so the AP and the hub/PWA/HA name always agree and every
+  physical switch is uniquely identifiable out of the box. Derive from the STA
+  MAC (`esp_wifi_get_mac(WIFI_IF_STA, …)`), **not** the AP base MAC — the AP MAC
+  differs by the locally-administered increment and would not match.
 - **Exit:** drop back to STA-only after save / timeout (10 min idle).
 
 **Trigger:** a button gesture that isn't already taken. Current map is short=toggle,
