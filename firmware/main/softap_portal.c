@@ -14,6 +14,8 @@
 #include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_mac.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
 
 #include "softap_portal.h"
 
@@ -78,6 +80,11 @@ static const char PAGE[] =
 "<div class='grid2'><div><span class='lbl'>MQTT broker (optional)</span><input id='whost' maxlength='64'></div>\n"
 "<div><span class='lbl'>Port</span><input id='wport' type='number' value='8883'></div></div>\n"
 "<button class='btn' onclick='saveWifi()'>Save WiFi</button></div>\n"
+"<div class='card'><h2>Firmware update</h2>\n"
+"<p class='note' style='margin-top:0'>Upload a SmartGhar Smart Switch <b>.bin</b> &mdash; a newer TankSync image, or the Matter image to change the switch's mode. The switch reboots into it; an image that fails to boot falls back automatically. <b>The relay turns OFF during the reboot.</b></p>\n"
+"<input type='file' id='fw' accept='.bin'>\n"
+"<button class='btn' onclick='ota()'>Flash firmware</button>\n"
+"<div class='note' id='otaout'></div></div>\n"
 "<div class='card'><h2>Done?</h2>\n"
 "<button class='btn warn' onclick='exitAp()'>Close portal</button>\n"
 "<p class='note'>The access point also closes by itself after 10 minutes of inactivity. Reopen it anytime: hold the button for 4 seconds.</p></div>\n"
@@ -112,6 +119,16 @@ static const char PAGE[] =
 "var q='ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(g('wpass').value)+'&host='+encodeURIComponent(g('whost').value.trim())+'&port='+(parseInt(g('wport').value)||8883);\n"
 "var r=await api('/api/wifi?'+q,'POST');toast(r.ok?'WiFi saved \\u2014 used when standalone mode ships':'Failed',r.ok)}\n"
 "async function exitAp(){toast('Closing portal\\u2026');try{await api('/api/exit','POST')}catch(e){}}\n"
+"function ota(){var f=g('fw').files[0];if(!f){toast('Choose a .bin file first',false);return}\n"
+"var o=g('otaout');o.textContent='Uploading '+Math.round(f.size/1024)+' KB\\u2026';\n"
+"var x=new XMLHttpRequest();x.open('POST','/api/ota');x.timeout=180000;\n"
+"x.upload.onprogress=function(e){if(e.lengthComputable)o.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%'};\n"
+"x.onload=function(){try{var r=JSON.parse(x.responseText);\n"
+"if(r.ok){o.innerHTML=\"<span class='ok'>Flashed \\u2014 rebooting into the new image\\u2026</span>\";toast('Flashed')}\n"
+"else{o.innerHTML=\"<span class='err'>\"+(r.err||'Failed')+'</span>';toast(r.err||'Failed',false)}\n"
+"}catch(e){o.textContent='Device rebooting\\u2026'}};\n"
+"x.onerror=function(){o.textContent='Connection dropped \\u2014 the switch may be rebooting into the new image.'};\n"
+"x.send(f)}\n"
 "load();setInterval(load,3000);\n"
 "</script></body></html>\n";
 
@@ -222,6 +239,45 @@ static esp_err_t h_wifi(httpd_req_t *req) {
     return send_json(req, "{\"ok\":true}");
 }
 
+// POST /api/ota — raw .bin body streamed into the INACTIVE OTA slot. This is
+// both the firmware-update path AND the TankSync↔Matter mode-swap: whichever
+// image is uploaded boots next. Rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+// reverts automatically if the new image never marks itself valid.
+static void do_restart(void *arg) { (void)arg; esp_restart(); }
+
+static esp_err_t h_ota(httpd_req_t *req) {
+    touch();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    if (!next)
+        return send_json(req, "{\"ok\":false,\"err\":\"No OTA slot - partition table predates 0.3.0 (serial reflash once)\"}");
+    if (req->content_len <= 0 || req->content_len > (int)next->size)
+        return send_json(req, "{\"ok\":false,\"err\":\"Image missing or larger than the OTA slot\"}");
+
+    esp_ota_handle_t oh;
+    if (esp_ota_begin(next, OTA_WITH_SEQUENTIAL_WRITES, &oh) != ESP_OK)
+        return send_json(req, "{\"ok\":false,\"err\":\"Could not start the flash write\"}");
+
+    char buf[2048];
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        int n = httpd_req_recv(req, buf, remaining < (int)sizeof(buf) ? remaining : (int)sizeof(buf));
+        if (n <= 0) { esp_ota_abort(oh); return send_json(req, "{\"ok\":false,\"err\":\"Upload interrupted\"}"); }
+        if (esp_ota_write(oh, buf, n) != ESP_OK) { esp_ota_abort(oh); return send_json(req, "{\"ok\":false,\"err\":\"Flash write failed\"}"); }
+        remaining -= n;
+    }
+    if (esp_ota_end(oh) != ESP_OK)
+        return send_json(req, "{\"ok\":false,\"err\":\"Image failed validation - wrong or corrupt .bin\"}");
+    if (esp_ota_set_boot_partition(next) != ESP_OK)
+        return send_json(req, "{\"ok\":false,\"err\":\"Could not set boot partition\"}");
+
+    ESP_LOGW(TAG, "OTA flashed %d bytes to %s — rebooting", req->content_len, next->label);
+    send_json(req, "{\"ok\":true}");
+    esp_timer_handle_t t;
+    const esp_timer_create_args_t a = { .callback = do_restart, .name = "ota_reboot" };
+    if (esp_timer_create(&a, &t) == ESP_OK) esp_timer_start_once(t, 800000);  // let the response flush
+    return ESP_OK;
+}
+
 static esp_err_t h_exit(httpd_req_t *req) {
     send_json(req, "{\"ok\":true}");
     // Stop from a timer, not from inside the server's own handler context.
@@ -267,7 +323,7 @@ void portal_start(void) {
     esp_wifi_set_config(WIFI_IF_AP, &ap);
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 8;
+    hc.max_uri_handlers = 10;
     hc.lru_purge_enable = true;
     if (httpd_start(&s_httpd, &hc) == ESP_OK) {
         const httpd_uri_t routes[] = {
@@ -277,6 +333,7 @@ void portal_start(void) {
             { .uri = "/api/config",    .method = HTTP_POST, .handler = h_config },
             { .uri = "/api/calibrate", .method = HTTP_POST, .handler = h_calibrate },
             { .uri = "/api/wifi",      .method = HTTP_POST, .handler = h_wifi },
+            { .uri = "/api/ota",       .method = HTTP_POST, .handler = h_ota },
             { .uri = "/api/exit",      .method = HTTP_POST, .handler = h_exit },
         };
         for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)

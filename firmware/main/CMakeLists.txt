@@ -11,6 +11,7 @@ idf_component_register(
         esp_timer
         esp_hw_support
         esp_http_server
+        app_update
 )
 
 # Bare XIAO ESP32-C6 test build (no ZMCT/NTC): idf.py -DXIAO_C6_TEST=1 build

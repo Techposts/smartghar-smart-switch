@@ -36,6 +36,7 @@
 #include "esp_wifi.h"
 #include "esp_now.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
 
 #include "config.h"
 #include "version_gen.h"   // FIRMWARE_VERSION (generated from VERSION)
@@ -469,6 +470,12 @@ void app_main(void) {
     xTaskCreate(safety_task, "safety", 4096, NULL, 6, NULL);
     xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
     xTaskCreate(telem_task,  "telem",  3072, NULL, 4, NULL);
+
+    // OTA rollback gate: radio + tasks are up, so this image works — accept it.
+    // If a freshly-flashed image crashes before reaching here, the bootloader
+    // reverts to the previous slot (which is how a broken Matter image falls
+    // back to this TankSync image, and vice versa).
+    esp_ota_mark_app_valid_cancel_rollback();
 
     // Auto-pair on boot when we have no hub yet — sweep channels for a hub that's
     // in its pairing window. (The button still triggers pairing on demand later.)

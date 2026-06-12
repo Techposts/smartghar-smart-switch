@@ -8,9 +8,21 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
 # Smaller log level for production; bump for bring-up.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# Single-app partition is fine for v0.1.0 (OTA partitioning added later).
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# Two-image OTA layout (0.3.0+): two 1.92MB slots shared by the TankSync and
+# Matter images. The SoftAP portal writes uploads into the inactive slot.
+# Moving an already-flashed unit onto this table requires ONE serial reflash.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_two_image.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# Rollback safety: a freshly-booted image must mark itself valid (we do, after
+# the radio + tasks come up) or the bootloader reverts to the previous slot.
+# This is also the mode-swap safety net — a broken Matter image falls back.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # Route the console to the native USB Serial/JTAG so logs appear over the XIAO's
 # USB port (default on C6 is UART0, which isn't broken out to USB on the XIAO).
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# XIAO C6 + C6-SuperMini both carry 4MB flash — required by the two-image table.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

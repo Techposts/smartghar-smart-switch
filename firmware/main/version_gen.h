@@ -1,3 +1,3 @@
 // AUTO-GENERATED from firmware/VERSION — do not edit.
 #pragma once
-#define FIRMWARE_VERSION "0.2.0"
+#define FIRMWARE_VERSION "0.3.0"
