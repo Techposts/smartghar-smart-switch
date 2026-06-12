@@ -1,0 +1,16 @@
+# Two-image partition table (4MB) — TankSync image + Matter image, swapped via
+# the SoftAP portal. BOTH images must be built against THIS exact table or the
+# mode-swap bricks the boot. Each OTA slot is 0x1E0000 (~1.92 MB) — the Matter
+# image MUST stay under that (size-optimized, WiFi-only). fctry holds the Matter
+# factory credentials (DAC/discriminator) per esp-matter convention.
+#
+# NOTE: moving an already-flashed unit from the old single-app table to this one
+# requires a SERIAL reflash (OTA cannot rewrite the partition table). Fine today:
+# no switches sold; only bench XIAOs exist.
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0xC000,
+otadata,  data, ota,     0x15000, 0x2000,
+phy_init, data, phy,     0x17000, 0x1000,
+fctry,    data, nvs,     0x18000, 0x6000,
+ota_0,    app,  ota_0,   0x20000, 0x1E0000,
+ota_1,    app,  ota_1,   0x200000,0x1E0000,
