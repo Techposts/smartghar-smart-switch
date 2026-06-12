@@ -41,4 +41,5 @@ void  sw_portal_apply_config(uint16_t volt, uint32_t imax_ma, uint32_t drymin_ma
 // sensors not fitted on this board profile).
 float sw_portal_calibrate(int known_ma);
 // Persist standalone-mode WiFi/MQTT credentials (future transport — captured now).
-void  sw_portal_save_wifi(const char *ssid, const char *pass, const char *host, uint16_t port);
+void  sw_portal_save_wifi(const char *ssid, const char *pass, const char *host, uint16_t port,
+                          const char *mq_user, const char *mq_pass);

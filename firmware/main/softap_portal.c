@@ -79,6 +79,8 @@ static const char PAGE[] =
 "<span class='lbl'>WiFi password</span><input id='wpass' type='password' maxlength='64'>\n"
 "<div class='grid2'><div><span class='lbl'>MQTT broker (optional)</span><input id='whost' maxlength='64'></div>\n"
 "<div><span class='lbl'>Port</span><input id='wport' type='number' value='8883'></div></div>\n"
+"<div class='grid2'><div><span class='lbl'>MQTT username (optional)</span><input id='wmqu' maxlength='32'></div>\n"
+"<div><span class='lbl'>MQTT password</span><input id='wmqp' type='password' maxlength='64'></div></div>\n"
 "<button class='btn' onclick='saveWifi()'>Save WiFi</button></div>\n"
 "<div class='card'><h2>Firmware update</h2>\n"
 "<p class='note' style='margin-top:0'>Upload a SmartGhar Smart Switch <b>.bin</b> &mdash; a newer TankSync image, or the Matter image to change the switch's mode. The switch reboots into it; an image that fails to boot falls back automatically. <b>The relay turns OFF during the reboot.</b></p>\n"
@@ -116,7 +118,7 @@ static const char PAGE[] =
 "if(r.ok){g('calout').innerHTML=\"<span class='ok'>Calibrated \\u2014 scale \"+r.scale.toFixed(3)+' mA/count. Live reading should now match.</span>';toast('Calibrated')}\n"
 "else{g('calout').innerHTML=\"<span class='err'>\"+(r.err||'Calibration failed')+'</span>';toast('Calibration failed',false)}load()}\n"
 "async function saveWifi(){var s=g('wssid').value.trim();if(!s){toast('Enter the WiFi network name',false);return}\n"
-"var q='ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(g('wpass').value)+'&host='+encodeURIComponent(g('whost').value.trim())+'&port='+(parseInt(g('wport').value)||8883);\n"
+"var q='ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(g('wpass').value)+'&host='+encodeURIComponent(g('whost').value.trim())+'&port='+(parseInt(g('wport').value)||8883)+'&mqu='+encodeURIComponent(g('wmqu').value.trim())+'&mqp='+encodeURIComponent(g('wmqp').value);\n"
 "var r=await api('/api/wifi?'+q,'POST');toast(r.ok?'WiFi saved \\u2014 used when standalone mode ships':'Failed',r.ok)}\n"
 "async function exitAp(){toast('Closing portal\\u2026');try{await api('/api/exit','POST')}catch(e){}}\n"
 "function ota(){var f=g('fw').files[0];if(!f){toast('Choose a .bin file first',false);return}\n"
@@ -230,12 +232,15 @@ static esp_err_t h_calibrate(httpd_req_t *req) {
 static esp_err_t h_wifi(httpd_req_t *req) {
     touch();
     char ssid[33] = {0}, pass[65] = {0}, host[65] = {0};
+    char mqu[33] = {0}, mqp[65] = {0};
     if (!qparam(req, "ssid", ssid, sizeof(ssid)) || !ssid[0])
         return send_json(req, "{\"ok\":false,\"err\":\"ssid required\"}");
     qparam(req, "pass", pass, sizeof(pass));
     qparam(req, "host", host, sizeof(host));
+    qparam(req, "mqu", mqu, sizeof(mqu));
+    qparam(req, "mqp", mqp, sizeof(mqp));
     long port = qparam_long(req, "port", 8883);
-    sw_portal_save_wifi(ssid, pass, host, (uint16_t)port);
+    sw_portal_save_wifi(ssid, pass, host, (uint16_t)port, mqu, mqp);
     return send_json(req, "{\"ok\":true}");
 }
 

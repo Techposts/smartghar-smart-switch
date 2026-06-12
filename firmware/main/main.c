@@ -379,13 +379,16 @@ float sw_portal_calibrate(int known_ma) {
     return s_zmct_scale;
 }
 
-void sw_portal_save_wifi(const char *ssid, const char *pass, const char *host, uint16_t port) {
+void sw_portal_save_wifi(const char *ssid, const char *pass, const char *host, uint16_t port,
+                         const char *mq_user, const char *mq_pass) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_str(h, "wifi_ssid", ssid);
         nvs_set_str(h, "wifi_pass", pass ? pass : "");
         nvs_set_str(h, "mqtt_host", host ? host : "");
         nvs_set_u16(h, "mqtt_port", port);
+        nvs_set_str(h, "mqtt_user", mq_user ? mq_user : "");
+        nvs_set_str(h, "mqtt_pass", mq_pass ? mq_pass : "");
         nvs_commit(h); nvs_close(h);
     }
     ESP_LOGI(TAG, "standalone WiFi creds saved (ssid=%s) — used when the WiFi/MQTT transport ships", ssid);
