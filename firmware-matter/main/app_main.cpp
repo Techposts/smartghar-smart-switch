@@ -16,6 +16,8 @@
 #include <nvs.h>
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <esp_matter.h>
 #include <common_macros.h>
@@ -130,6 +132,39 @@ extern "C" void app_main()
             nvs_close(h);
         }
         if (ssid[0]) {
+            // Users type SSIDs from memory and get the case wrong ("2.4GHz" vs
+            // "2.4GHZ") — and WiFi SSIDs are case-sensitive byte strings. Scan
+            // the air and, if a network matches case-insensitively, adopt its
+            // exact on-air bytes before joining.
+            // Heap-allocate the scan records: app_main's stack frame must stay
+            // small because esp_matter::start() above needs the depth (a stack
+            // array here boot-looped the device before start() even returned).
+            // CHIP may already be driving a (doomed, credential-less) connect
+            // attempt, and scans are refused while connecting — settle first.
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(600));
+            wifi_scan_config_t sc = {};
+            esp_err_t serr = esp_wifi_scan_start(&sc, true);
+            if (serr == ESP_OK) {
+                uint16_t total = 0;
+                esp_wifi_scan_get_ap_num(&total);
+                uint16_t n = total > 20 ? 20 : total;
+                wifi_ap_record_t *recs = (wifi_ap_record_t *)calloc(n ? n : 1, sizeof(wifi_ap_record_t));
+                if (recs && esp_wifi_scan_get_ap_records(&n, recs) == ESP_OK) {
+                    ESP_LOGI(TAG, "scan: %u APs visible", (unsigned)n);
+                    for (int i = 0; i < n; i++) {
+                        if (strcasecmp((const char *)recs[i].ssid, ssid) == 0 &&
+                            strcmp((const char *)recs[i].ssid, ssid) != 0) {
+                            ESP_LOGW(TAG, "SSID case-corrected: '%s' -> '%s'", ssid, recs[i].ssid);
+                            strncpy(ssid, (const char *)recs[i].ssid, sizeof(ssid) - 1);
+                            break;
+                        }
+                    }
+                }
+                free(recs);
+            } else {
+                ESP_LOGW(TAG, "WiFi scan failed (%s) — joining with stored SSID as-is", esp_err_to_name(serr));
+            }
             wifi_config_t wc = {};
             strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
             strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
