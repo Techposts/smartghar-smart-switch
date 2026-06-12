@@ -5,6 +5,33 @@
 > transports would work on the ESP32-C6 and in what order to build them. It is
 > a milestone plan, not a spec.
 
+## DECIDED 2026-06-12 — the product architecture
+
+One hardware product (ESP32-C6, 4 MB flash), **two switchable firmware images**,
+mode chosen by the user in the SoftAP portal:
+
+- **TankSync image** (ships today, ss-v0.2.x): ESP-NOW hub pairing → the full
+  pump brain (level automation, source guard, anti-cycling). The premium mode.
+- **Matter image** (next build): Matter-over-WiFi for everyone WITHOUT a hub —
+  Apple Home, Alexa, Google Home, and Home Assistant (HA speaks Matter
+  natively, which is why the separately-scoped WiFi/MQTT standalone mode is
+  **dropped** — Matter covers that audience with one stack).
+  Endpoints: On/Off Plug-in Unit + Temperature Sensor (all ecosystems) +
+  Electrical Power Measurement / Matter 1.3 (HA fully; big-3 rolling out).
+- The portal's mode switch flashes the other image into the second OTA slot
+  and reboots into it. A failed Matter boot falls back to the TankSync image.
+- **Both images carry the autonomous safety brain** (inrush-tolerant
+  over-current, welded-contact, dry-run, max-runtime, over-temp) + the portal
+  with per-board current calibration. That safety layer is the differentiator
+  no generic Matter plug has — "the smart switch that's safe to put on a motor".
+- Flash budget: TankSync image ~0.9 MB (fits anywhere); the Matter image must
+  stay **under ~1.9 MB** (size-optimized, WiFi transport only, no Thread at
+  first) to fit a 4 MB dual-slot table. If it can't be held there, the escape
+  hatch is the 8 MB module (C6-WROOM-1-N8) on a board respin.
+- Zigbee: not building (fragments the lineup; Matter wins interop).
+- Thread (→ Matter-over-Thread): later option — same Matter data model, the
+  C6's 802.15.4 radio already supports it.
+
 ## Why the C6 makes this possible
 
 The ESP32-C6 has **two independent 2.4 GHz radios**:
