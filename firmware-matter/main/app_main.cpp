@@ -9,10 +9,13 @@
 // OTA slot and vice versa. We mark ourselves valid after Matter starts so the
 // bootloader's rollback can rescue a broken upload.
 
+#include <string.h>
 #include <esp_err.h>
 #include <esp_log.h>
 #include <nvs_flash.h>
+#include <nvs.h>
 #include <esp_ota_ops.h>
+#include <esp_wifi.h>
 
 #include <esp_matter.h>
 #include <common_macros.h>
@@ -109,6 +112,34 @@ extern "C" void app_main()
 
     esp_err_t err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
+
+    // ── No-BLE commissioning bootstrap ────────────────────────────────────────
+    // Apple's BLE stacks (iOS + macOS) repeatedly failed to commission this
+    // device while the firmware side was provably healthy. Escape hatch: if the
+    // SoftAP portal (TankSync image — SAME NVS) stored home-WiFi credentials,
+    // join the network directly at boot. A commissionable Matter node that is
+    // already on the LAN advertises over mDNS, and controllers (HA's Matter
+    // server) commission it entirely over IP — Bluetooth never involved.
+    {
+        char ssid[33] = {0}, pass[65] = {0};
+        size_t sl = sizeof(ssid), pl = sizeof(pass);
+        nvs_handle_t h;
+        if (nvs_open("swcfg", NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_str(h, "wifi_ssid", ssid, &sl);
+            nvs_get_str(h, "wifi_pass", pass, &pl);
+            nvs_close(h);
+        }
+        if (ssid[0]) {
+            wifi_config_t wc = {};
+            strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
+            strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
+            esp_wifi_set_config(WIFI_IF_STA, &wc);
+            esp_wifi_connect();
+            ESP_LOGW(TAG, "Bootstrap WiFi join '%s' — commission OVER THE NETWORK (no BLE needed)", ssid);
+        } else {
+            ESP_LOGW(TAG, "No portal WiFi creds in NVS — BLE commissioning only");
+        }
+    }
 
     app_driver_button_start();
     app_driver_telemetry_start();
